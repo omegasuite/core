@@ -203,13 +203,13 @@ func (m *MinerChain) checkProofOfWork(header *wire.MingingRightBlock, powLimit *
 			if c == 0 {
 				c = 1
 			}
-			v,_ := m.blockChain.CheckCollateral(wire.NewMinerBlock(header), flags)
+			v,_ := m.blockChain.CheckCollateral(wire.NewMinerBlock(header), &header.BestBlock, flags)
 			h1 := int64(v / c)
 			if h1 < 1 {
 				h1 = 1
 			}
 
-			prev,_ := m.BlockByHash(&header.PrevBlock)
+			prev,_ := m.DBBlockByHash(&header.PrevBlock)
 			minscore := prev.MsgBlock().MeanTPH >> 3
 			if minscore == 0 {
 				minscore = 1
@@ -452,7 +452,7 @@ func (b *MinerChain) checkBlockContext(block *wire.MinerBlock, prevNode *chainut
 				main = true
 			}
 			tb,_ := b.blockChain.HashToBlock(&tx)	// already checked that it exists
-			if tb.Height() != p.Height {
+			if tb == nil || tb.Height() != p.Height {
 				return ruleError(ErrBlackList, fmt.Errorf("Invalid height of violating block: %s", tx.String()).Error())
 			}
 

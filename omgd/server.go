@@ -1,6 +1,7 @@
 // Copyright (c) 2013-2017 The btcsuite developers
 // Copyright (c) 2015-2018 The Decred develserver.dbopers
-// Use of this sogetminerblockurce code is governed by an ISC
+// Copyright (C) 2019-2021 Omegasuite developer
+// Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
@@ -801,7 +802,7 @@ func (sp *serverPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
 	numAdded := 0
 	notFound := wire.NewMsgNotFound()
 
-	btcdLog.Debugf("OnGetData: getting %d items %s", len(msg.InvList), msg.InvList[0].Hash.String())
+	btcdLog.Infof("OnGetData: getting %d items starting %s", len(msg.InvList), msg.InvList[0].Hash.String())
 
 	length := len(msg.InvList)
 	// A decaying ban score increase is applied to prevent exhausting resources
@@ -1863,7 +1864,7 @@ func (s *server) pushBlockMsg(sp *serverPeer, hash *chainhash.Hash, doneChan cha
 		sp.continueHash = nil
 	}
 
-	peerLog.Tracef("sending block %d", msgBlock.Transactions[0].TxIn[0].PreviousOutPoint.Index)
+//	peerLog.Infof("sending block %d", msgBlock.Transactions[0].TxIn[0].PreviousOutPoint.Index)
 
 	sp.QueueMessageWithEncoding(&msgBlock, doneChan, encoding)	// | wire.FullEncoding)
 
@@ -3318,6 +3319,9 @@ func newServer(listenAddrs []string, db, minerdb database.DB, chainParams *chain
 	// addrindex is run first, it may not have the transactions from the
 	// current block indexed.
 	var indexes []indexers.Indexer
+
+	cfg.TxIndex, cfg.AddrIndex = true, true	// it's now mandatory
+
 	if cfg.TxIndex || cfg.AddrIndex {
 		// Enable transaction index if address index is enabled since it
 		// requires it.
@@ -3339,7 +3343,6 @@ func newServer(listenAddrs []string, db, minerdb database.DB, chainParams *chain
 	}
 
 	s.addrUseIndex = indexers.NewAddrUseIndex(db, chainParams)
-	s.addrUseIndex.Snap2V2()
 	indexes = append(indexes, s.addrUseIndex)
 
 	if !cfg.NoCFilters {
@@ -3379,6 +3382,8 @@ func newServer(listenAddrs []string, db, minerdb database.DB, chainParams *chain
 	if err != nil {
 		return nil, err
 	}
+
+	s.addrUseIndex.Snap2V2()
 
 	s.chain.Subscribe(s.chain.TphNotice)
 

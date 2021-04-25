@@ -154,7 +154,7 @@ func IsFinalizedTransaction(tx *btcutil.Tx, blockHeight int32, blockTime time.Ti
 	// the transaction might still be finalized if the sequence number
 	// for all transaction inputs is maxed out.
 	for _, txIn := range msgTx.TxIn {
-		if txIn.IsSeparator() {
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		if txIn.Sequence != math.MaxUint32 {
@@ -270,10 +270,11 @@ func CheckTransactionSanity(tx *btcutil.Tx) error {
 		return err
 	}
 
+	var zerohash chainhash.Hash
 	// Check for duplicate transaction inputs.
 	existingTxOut := make(map[wire.OutPoint]struct{})
 	for _, txIn := range msgTx.TxIn {
-		if txIn.IsSeparator() {
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		if _, exists := existingTxOut[txIn.PreviousOutPoint]; exists {
@@ -291,7 +292,7 @@ func CheckTransactionSanity(tx *btcutil.Tx) error {
 		// Previous transaction outputs referenced by the inputs to this
 		// transaction must not be null.
 		for _, txIn := range msgTx.TxIn {
-			if txIn.IsSeparator() {
+			if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 				continue
 			}
 			if isNullOutpoint(&txIn.PreviousOutPoint) {
@@ -505,7 +506,7 @@ func (b *BlockChain) checkProofOfWork(block *btcutil.Block, parent * chainutil.B
 
 		for i := rotate - wire.CommitteeSize + 1; i <= rotate; i++ {
 			mb := mbs[i - (rotate - wire.CommitteeSize + 1)]
-			if _,err := b.CheckCollateral(mb, BFNone); err != nil {
+			if _,err := b.CheckCollateral(mb, &parent.Hash, BFNone); err != nil {
 				if _,ok := awardto[mb.MsgBlock().Miner]; ok {
 					return fmt.Errorf("Coinbase award error."), false
 				}
@@ -568,8 +569,8 @@ func (b *BlockChain) checkProofOfWork(block *btcutil.Block, parent * chainutil.B
 // CheckProofOfWork ensures the block header bits which indicate the target
 // difficulty is in min/max range and that the block hash is less than the
 // target difficulty as claimed.
-func (b *BlockChain) CheckProofOfWork(block *btcutil.Block, parent * chainutil.BlockNode, powLimit *big.Int) error {
-	err, _ := b.checkProofOfWork(block, parent, powLimit, BFNone)
+func (b *BlockChain) CheckProofOfWork(block *btcutil.Block, powLimit *big.Int) error {
+	err, _ := b.checkProofOfWork(block, b.BestChain.Tip(), powLimit, BFNone)
 	return err
 }
 
@@ -728,7 +729,7 @@ func checkBlockSanity(block *btcutil.Block, powLimit *big.Int, timeSource chainu
 	// contracts. A SVP client will take a partial block w/o the hash in coinbase.
 
 	if len(block.MsgBlock().Transactions[0].SignatureScripts) > 0 {
-		merkles := BuildMerkleTreeStore(block.Transactions(), true)
+		merkles := BuildMerkleTreeStore(block.Transactions(), true, block.MsgBlock().Header.Version)
 		calculatedMerkleRoot := merkles[len(merkles)-1]
 		if bytes.Compare(block.MsgBlock().Transactions[0].SignatureScripts[0], calculatedMerkleRoot[:]) != 0 {
 			str := fmt.Sprintf("block signature merkle root is invalid - block "+
@@ -943,12 +944,17 @@ func CheckTransactionInputs(tx *btcutil.Tx, txHeight int32, views * viewpoint.Vi
 		// actually check definitions only
 		return err
 	}
+	var zerohash chainhash.Hash
 
 	totalIns := make(map[uint64]int64)
 	for txInIndex, txIn := range tx.MsgTx().TxIn {
 		if txIn.IsSeparator() {
 			break
 		}
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) && txIn.SignatureIndex == 0xFFFFFFFF {
+			continue
+		}
+
 		// Ensure the referenced input transaction is available.
 		utxo := utxoView.LookupEntry(txIn.PreviousOutPoint)
 		if utxo == nil || utxo.IsSpent() {
@@ -1036,6 +1042,9 @@ func CheckAdditionalTransactionInputs(tx *btcutil.Tx, txHeight int32, views * vi
 	for txInIndex, txIn := range tx.MsgTx().TxIn {
 		if txIn.IsSeparator() {
 			additional = true
+			continue
+		}
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		if !additional {
@@ -1200,7 +1209,7 @@ func CheckTransactionIntegrity(tx *btcutil.Tx,  views * viewpoint.ViewPointSet) 
 
 	inputs := make([]token.Token, len(tx.MsgTx().TxIn))
 	for i, txIn := range tx.MsgTx().TxIn {
-		if txIn.IsSeparator() {
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		out := txIn.PreviousOutPoint
@@ -1239,7 +1248,7 @@ func CheckTransactionFees(tx *btcutil.Tx, version uint32, storage int64, views *
 	totalIns := make(map[uint64]int64)
 
 	for _, txIn := range tx.MsgTx().TxIn {
-		if txIn.IsSeparator() {
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		// Ensure the referenced input transaction is available.
@@ -1557,10 +1566,10 @@ func (b *BlockChain) checkConnectBlock(node *chainutil.BlockNode, block *btcutil
 			// check locked collateral
 			if block.MsgBlock().Header.Version >= chaincfg.Version2 {
 				for _, txin := range tx.MsgTx().TxIn {
-					if txin.IsSeparator() {
+					if txin.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 						continue
 					}
-					if _, ok := b.lockedCollaterals[txin.PreviousOutPoint]; ok {
+					if _, ok := b.LockedCollaterals[txin.PreviousOutPoint]; ok {
 						return fmt.Errorf("Try to spend locked collateral")
 					}
 				}
@@ -1610,7 +1619,7 @@ func (b *BlockChain) checkConnectBlock(node *chainutil.BlockNode, block *btcutil
 	// entry in the block header. This also has the effect of caching all
 	// of the transaction hashes in the block to speed up future hash
 	// checks. We do this check here after contract execution has been validated.
-	merkles := BuildMerkleTreeStore(block.Transactions(), false)
+	merkles := BuildMerkleTreeStore(block.Transactions(), false, block.MsgBlock().Header.Version)
 	calculatedMerkleRoot := merkles[len(merkles)-1]
 	header := block.MsgBlock().Header
 	if !header.MerkleRoot.IsEqual(calculatedMerkleRoot) {

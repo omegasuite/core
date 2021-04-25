@@ -102,6 +102,7 @@ type txPriorityQueue struct {
 	items    []*txPrioItem
 }
 
+var zerohash chainhash.Hash
 // Len returns the number of items in the priority queue.  It is part of the
 // heap.Interface implementation.
 func (pq *txPriorityQueue) Len() int {
@@ -311,7 +312,7 @@ func createCoinbaseTx(params *chaincfg.Params, nextBlockHeight int32, addrs []bt
 // which are not provably unspendable as available unspent transaction outputs.
 func spendTransaction(utxoView *viewpoint.ViewPointSet, tx *btcutil.Tx, height int32) error {
 	for _, txIn := range tx.MsgTx().TxIn {
-		if txIn.IsSeparator() {
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		entry := utxoView.Utxo.LookupEntry(txIn.PreviousOutPoint)
@@ -579,6 +580,25 @@ mempoolLoop:
 			log.Tracef("Skipping coinbase tx %s", tx.Hash())
 			continue
 		}
+		log.Infof("mempoolLoop processing tx %s", tx.Hash())
+
+		if s.MsgBlock().Version &^ 0xFFFF >= chaincfg.Version2 {
+			var locked = false
+			for _, txin := range tx.MsgTx().TxIn {
+				if txin.PreviousOutPoint.Hash.IsEqual(&zerohash) {
+					continue
+				}
+				if _, ok := g.Chain.LockedCollaterals[txin.PreviousOutPoint]; ok {
+					locked = true
+					break
+				}
+			}
+			if locked {
+				log.Tracef("Skipping tx %s that spends locked UTXO", tx.Hash())
+				continue
+			}
+		}
+
 		if !blockchain.IsFinalizedTransaction(tx, nextBlockHeight,
 			g.timeSource.AdjustedTime()) {
 
@@ -603,7 +623,7 @@ mempoolLoop:
 		// ordered below.
 		prioItem := &txPrioItem{tx: tx}
 		for _, txIn := range tx.MsgTx().TxIn {
-			if txIn.IsSeparator() {
+			if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 				// never here
 				continue
 			}
@@ -965,7 +985,7 @@ mempoolLoop:
 	// Next, obtain the merkle root of a tree which consists of the
 	// wtxid of all transactions in the block. The coinbase
 	// transaction will have a special wtxid of all zeroes.
-	witnessMerkleTree := blockchain.BuildMerkleTreeStore(blockTxns,true)
+	witnessMerkleTree := blockchain.BuildMerkleTreeStore(blockTxns,true, s.MsgBlock().Version &^ 0xFFFF)
 	witnessMerkleRoot := witnessMerkleTree[len(witnessMerkleTree)-1]
 
 	msg := coinbaseTx.MsgTx()
@@ -980,7 +1000,7 @@ mempoolLoop:
 //	reqDifficulty := g.Chain.BestSnapshot().Bits
 
 	// Create a new block ready to be solved.
-	merkles := blockchain.BuildMerkleTreeStore(blockTxns, false)
+	merkles := blockchain.BuildMerkleTreeStore(blockTxns, false, s.MsgBlock().Version &^ 0xFFFF)
 	var msgBlock wire.MsgBlock
 	msgBlock.Header = wire.BlockHeader{
 		Version:    s.MsgBlock().Version &^ 0xFFFF,
@@ -1093,7 +1113,9 @@ func (g *BlkTmplGenerator) NewMinerBlockTemplate(last *chainutil.BlockNode, payT
 	// it that is less than chain param, it could be 0 implying the chain
 	// defauly limit
 	contractlim := 2 * g.Chain.MaxContractExec(lastBlk.BestBlock, cbest.Hash)
-	if lastBlk.ContractLimit > contractlim {
+	if contractlim < lastBlk.ContractLimit * 95 / 100 && contractlim > 10000000 {
+		contractlim = lastBlk.ContractLimit * 95 / 100
+	} else if contractlim < lastBlk.ContractLimit {
 		contractlim = lastBlk.ContractLimit
 	}
 	if contractlim < g.chainParams.ContractExecLimit {

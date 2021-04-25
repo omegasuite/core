@@ -75,6 +75,8 @@ var (
 	// unsupported address type has been used.
 	errUnsupportedAddressType = errors.New("address type is not supported " +
 		"by the address index")
+
+	zerohash = chainhash.Hash{}
 )
 
 // copied from ovm to avoid circular importation
@@ -257,23 +259,44 @@ func dbPutAddrIndexEntry(bucket internalBucket, addrKey [addrKeySize]byte, block
 }
 
 // dbFetchAddrIndexEntries returns block regions for transactions referenced by
-// the given address key and the number of entries skipped since it could have
+// the given address key and the height of blocks skipped since it could have
 // been less in the case where there are less total entries than the requested
 // number of entries to skip.
-func dbFetchAddrIndexEntries(bucket internalBucket, addrKey [addrKeySize]byte, numToSkip, numRequested uint32, reverse bool, fetchBlockHash fetchBlockHashFunc) ([]database.BlockRegion, uint32, error) {
-	// When the reverse flag is not set, all levels need to be fetched
-	// because numToSkip and numRequested are counted from the oldest
-	// transactions (highest level) and thus the total count is needed.
-	// However, when the reverse flag is set, only enough records to satisfy
-	// the requested amount are needed.
+func dbFetchAddrIndexEntries(bucket internalBucket, addrKey [addrKeySize]byte, blocksToSkip, numRequested uint32, reverse bool, fetchBlockHash fetchBlockHashFunc) ([]database.BlockRegion, []uint32, uint32, error) {
+	// When the reverse flag is not set, we will fetch the oldest txs first.
+	// when it is set, we will fetch the most recent txs first.
+	// blocksToSkip represents the last skipped block (height), after this point are the
+	// blocks in which txs are returned, with exception of blocksToSkip=0, which means nothing
+	// to skip. we always return all the tx in one block reradless whether numRequested is met.
+
 	var level uint8
 	var serialized []byte
-	for !reverse || len(serialized) < int(numToSkip+numRequested)*txEntrySize {
+
+enough:
+	for true {
+//	for !reverse || len(serialized) < int(numToSkip+numRequested)*txEntrySize {
 		curLevelKey := keyForLevel(addrKey, level)
 		levelData := bucket.Get(curLevelKey[:])
 		if levelData == nil {
 			// Stop when there are no more levels.
 			break
+		}
+
+		if blocksToSkip != 0 {
+			if reverse {
+				// don't prepend if block height of first entry is greater than blocksToSkip
+				h := byteOrder.Uint32(levelData)
+				if h >= blocksToSkip {
+					level++
+					continue
+				}
+			} else {
+				// done if block height of last entry is smaller than blocksToSkip
+				h := byteOrder.Uint32(levelData[len(levelData) - txEntrySize:])
+				if h <= blocksToSkip {
+					break enough
+				}
+			}
 		}
 
 		// Higher levels contain older transactions, so prepend them.
@@ -284,41 +307,43 @@ func dbFetchAddrIndexEntries(bucket internalBucket, addrKey [addrKeySize]byte, n
 		level++
 	}
 
-	// When the requested number of entries to skip is larger than the
-	// number available, skip them all and return now with the actual number
-	// skipped.
 	numEntries := uint32(len(serialized) / txEntrySize)
-	if numToSkip >= numEntries {
-		return nil, numEntries, nil
-	}
-
-	// Nothing more to do when there are no requested entries.
-	if numRequested == 0 {
-		return nil, numToSkip, nil
-	}
-
-	// Limit the number to load based on the number of available entries,
-	// the number to skip, and the number requested.
-	numToLoad := numEntries - numToSkip
-	if numToLoad > numRequested {
-		numToLoad = numRequested
-	}
 
 	// Start the offset after all skipped entries and load the calculated
 	// number.
-	results := make([]database.BlockRegion, numToLoad)
-	for i := uint32(0); i < numToLoad; i++ {
+	results := make([]database.BlockRegion, 0, numRequested)
+	heights := make([]uint32, 0, numRequested)
+	loaded := uint32(0)
+	stopheight := uint32(0)
+	var item database.BlockRegion
+
+	on := (blocksToSkip == 0)
+
+	for i := uint32(0); i < numEntries; i++ {
 		// Calculate the read offset according to the reverse flag.
 		var offset uint32
 		if reverse {
-			offset = (numEntries - numToSkip - i - 1) * txEntrySize
+			offset = (numEntries - i - 1) * txEntrySize
 		} else {
-			offset = (numToSkip + i) * txEntrySize
+			offset = i * txEntrySize
 		}
 
+		h := byteOrder.Uint32(serialized[offset:])
+		if !on {
+			if !(reverse && h <= blocksToSkip) && !(!reverse && h >= blocksToSkip) {
+				continue
+			}
+			on = true
+		}
+
+		loaded++
+		if loaded > numRequested && h != stopheight {
+			break
+		}
+
+		stopheight = h
 		// Deserialize and populate the result.
-		err := deserializeAddrIndexEntry(serialized[offset:],
-			&results[i], fetchBlockHash)
+		err := deserializeAddrIndexEntry(serialized[offset:], &item, fetchBlockHash)
 		if err != nil {
 			// Ensure any deserialization errors are returned as
 			// database corruption errors.
@@ -331,11 +356,14 @@ func dbFetchAddrIndexEntries(bucket internalBucket, addrKey [addrKeySize]byte, n
 				}
 			}
 
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
+
+		results = append(results, item)
+		heights = append(heights, h)
 	}
 
-	return results, numToSkip, nil
+	return results, heights, stopheight, nil
 }
 
 // minEntriesToReachLevel returns the minimum number of entries that are
@@ -666,15 +694,24 @@ func ExtractPkScriptAddrs(pkScript []byte, chainParams *chaincfg.Params) ([]btcu
 	if IsContract(pkScript[0]) {
 		addr, _ = btcutil.NewAddressContract(pkScript[1:21], chainParams)
 	} else {
-		if len(pkScript) < 25 {
-			return nil, 0, fmt.Errorf("Malformed pkScript")
-		}
+//		if len(pkScript) < 25 {
+//			return nil, 0, fmt.Errorf("Malformed pkScript")
+//		}
 		switch pkScript[21] {
 		case OP_PAY2PKH:
+			if pkScript[0] != chainParams.PubKeyHashAddrID {
+				return nil, 0, fmt.Errorf("Malformed pkScript")
+			}
 			addr, _ = btcutil.NewAddressPubKeyHash(pkScript[1:21], chainParams)
 		case OP_PAYMULTISIG:
+			if pkScript[0] != chainParams.ScriptHashAddrID {
+				return nil, 0, fmt.Errorf("Malformed pkScript")
+			}
 			addr, _ = btcutil.NewAddressMultiSig(pkScript[1:21], chainParams)
 		case OP_PAY2SCRIPTH:
+			if pkScript[0] != chainParams.MultiSigAddrID {
+				return nil, 0, fmt.Errorf("Malformed pkScript")
+			}
 			addr, _ = btcutil.NewAddressScriptHash(pkScript[1:21], chainParams)
 		default:
 			return nil, 0, nil
@@ -732,7 +769,7 @@ func (idx *AddrIndex) indexBlock(data writeIndexData, block *btcutil.Block,
 		// a coinbase.
 		if txIdx != 0 {
 			for _,txIn := range tx.MsgTx().TxIn {
-				if txIn.IsSeparator() {
+				if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 					continue
 				}
 				// We'll access the slice of all the
@@ -831,13 +868,14 @@ func (idx *AddrIndex) DisconnectBlock(dbTx database.Tx, block *btcutil.Block,
 // that involve a given address.
 //
 // This function is safe for concurrent access.
-func (idx *AddrIndex) TxRegionsForAddress(dbTx database.Tx, addr btcutil.Address, numToSkip, numRequested uint32, reverse bool) ([]database.BlockRegion, uint32, error) {
+func (idx *AddrIndex) TxRegionsForAddress(dbTx database.Tx, addr btcutil.Address, blocksToSkip, numRequested uint32, reverse bool) ([]database.BlockRegion, []uint32, uint32, error) {
 	addrKey, err := AddrToKey(addr)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
 	var regions []database.BlockRegion
+	var heights []uint32
 	var skipped uint32
 	err = idx.db.View(func(dbTx database.Tx) error {
 		// Create closure to lookup the block hash given the ID using
@@ -849,13 +887,13 @@ func (idx *AddrIndex) TxRegionsForAddress(dbTx database.Tx, addr btcutil.Address
 
 		var err error
 		addrIdxBucket := dbTx.Metadata().Bucket(addrIndexKey)
-		regions, skipped, err = dbFetchAddrIndexEntries(addrIdxBucket,
-			addrKey, numToSkip, numRequested, reverse,
+		regions, heights, skipped, err = dbFetchAddrIndexEntries(addrIdxBucket,
+			addrKey, blocksToSkip, numRequested, reverse,
 			fetchBlockHash)
 		return err
 	})
 
-	return regions, skipped, err
+	return regions, heights, skipped, err
 }
 
 // indexUnconfirmedAddresses modifies the unconfirmed (memory-only) address
@@ -911,7 +949,7 @@ func (idx *AddrIndex) AddUnconfirmedTx(tx *btcutil.Tx, utxoView *viewpoint.UtxoV
 	// transaction has already been validated and thus all inputs are
 	// already known to exist.
 	for _, txIn := range tx.MsgTx().TxIn {
-		if txIn.IsSeparator() {
+		if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 			continue
 		}
 		entry := utxoView.LookupEntry(txIn.PreviousOutPoint)

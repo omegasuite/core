@@ -60,7 +60,7 @@ func (s SigHashType) String() string {
 
 // FutureGetRawTransactionResult is a future promise to deliver the result of a
 // GetRawTransactionAsync RPC invocation (or an applicable error).
-type FutureGetRawTransactionResult chan *response
+type FutureGetRawTransactionResult chan *Response
 
 // Receive waits for the response promised by the future and returns a
 // transaction given its hash.
@@ -117,7 +117,7 @@ func (c *Client) GetRawTransaction(txHash *chainhash.Hash, includeMempool *bool)
 // FutureGetRawTransactionVerboseResult is a future promise to deliver the
 // result of a GetRawTransactionVerboseAsync RPC invocation (or an applicable
 // error).
-type FutureGetRawTransactionVerboseResult chan *response
+type FutureGetRawTransactionVerboseResult chan *Response
 
 // Receive waits for the response promised by the future and returns information
 // about a transaction given its hash.
@@ -160,9 +160,10 @@ func (c *Client) GetRawTransactionVerbose(txHash *chainhash.Hash, includeMempool
 	return c.GetRawTransactionVerboseAsync(txHash, includeMempool).Receive()
 }
 
+
 // FutureDecodeRawTransactionResult is a future promise to deliver the result
 // of a DecodeRawTransactionAsync RPC invocation (or an applicable error).
-type FutureDecodeRawTransactionResult chan *response
+type FutureDecodeRawTransactionResult chan *Response
 
 // Receive waits for the response promised by the future and returns information
 // about a transaction given its serialized bytes.
@@ -201,7 +202,7 @@ func (c *Client) DecodeRawTransaction(serializedTx []byte) (*btcjson.TxRawResult
 
 // FutureCreateRawTransactionResult is a future promise to deliver the result
 // of a CreateRawTransactionAsync RPC invocation (or an applicable error).
-type FutureCreateRawTransactionResult chan *response
+type FutureCreateRawTransactionResult chan *Response
 
 // Receive waits for the response promised by the future and returns a new
 // transaction spending the provided inputs and sending to the provided
@@ -269,7 +270,7 @@ func (c *Client) CreateRawTransaction(inputs []btcjson.TransactionInput, definit
 
 // FutureSendRawTransactionResult is a future promise to deliver the result
 // of a SendRawTransactionAsync RPC invocation (or an applicable error).
-type FutureSendRawTransactionResult chan *response
+type FutureSendRawTransactionResult chan *Response
 
 // Receive waits for the response promised by the future and returns the result
 // of submitting the encoded transaction to the server which then relays it to
@@ -288,6 +289,24 @@ func (r FutureSendRawTransactionResult) Receive() (*chainhash.Hash, error) {
 	}
 
 	return chainhash.NewHashFromStr(txHashStr)
+}
+
+type FutureCheckForkResult chan *Response
+
+func (r FutureCheckForkResult) Receive() (int32, error) {
+	res, err := receiveFuture(r)
+	if err != nil {
+		return -1, err
+	}
+
+	// Unmarshal result as a int32.
+	var h int32
+	err = json.Unmarshal(res, &h)
+	if err != nil {
+		return -1, err
+	}
+
+	return h, nil
 }
 
 // SendRawTransactionAsync returns an instance of a type that can be used to get
@@ -318,10 +337,21 @@ func (c *Client) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (*chainh
 	return c.SendRawTransactionAsync(tx, allowHighFees).Receive()
 }
 
+func (c *Client) CheckForkAsync(txHex string) FutureCheckForkResult {
+	cmd := btcjson.NewCheckForkCmd(txHex)
+	return c.sendCmd(cmd)
+}
+
+// SendRawTransaction submits the encoded transaction to the server which will
+// then relay it to the network.
+func (c *Client) CheckFork(h string) (int32, error) {
+	return c.CheckForkAsync(h).Receive()
+}
+
 // FutureSignRawTransactionResult is a future promise to deliver the result
 // of one of the SignRawTransactionAsync family of RPC invocations (or an
 // applicable error).
-type FutureSignRawTransactionResult chan *response
+type FutureSignRawTransactionResult chan *Response
 
 // Receive waits for the response promised by the future and returns the
 // signed transaction as well as whether or not all inputs are now signed.
@@ -377,7 +407,7 @@ func (c *Client) SignRawTransactionAsync(tx *wire.MsgTx, privkeys []string) Futu
 // FutureSignRawTransactionResult is a future promise to deliver the result
 // of one of the SignRawTransactionAsync family of RPC invocations (or an
 // applicable error).
-type FutureSignHashResult chan *response
+type FutureSignHashResult chan *Response
 
 // Receive waits for the response promised by the future and returns the
 // signed transaction as well as whether or not all inputs are now signed.
@@ -566,7 +596,7 @@ func (c *Client) SignRawTransaction4(tx *wire.MsgTx,
 
 // FutureSearchRawTransactionsResult is a future promise to deliver the result
 // of the SearchRawTransactionsAsync RPC invocation (or an applicable error).
-type FutureSearchRawTransactionsResult chan *response
+type FutureSearchRawTransactionsResult chan *Response
 
 // Receive waits for the response promised by the future and returns the
 // found raw transactions.
@@ -631,7 +661,7 @@ func (c *Client) SearchRawTransactions(address btcutil.Address, skip, count int,
 // FutureSearchRawTransactionsVerboseResult is a future promise to deliver the
 // result of the SearchRawTransactionsVerboseAsync RPC invocation (or an
 // applicable error).
-type FutureSearchRawTransactionsVerboseResult chan *response
+type FutureSearchRawTransactionsVerboseResult chan *Response
 
 // Receive waits for the response promised by the future and returns the
 // found raw transactions.
@@ -686,7 +716,7 @@ func (c *Client) SearchRawTransactionsVerbose(address btcutil.Address, skip,
 
 // FutureDecodeScriptResult is a future promise to deliver the result
 // of a DecodeScriptAsync RPC invocation (or an applicable error).
-type FutureDecodeScriptResult chan *response
+type FutureDecodeScriptResult chan *Response
 
 // Receive waits for the response promised by the future and returns information
 // about a script given its serialized bytes.

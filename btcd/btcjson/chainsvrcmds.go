@@ -578,6 +578,9 @@ func NewGetChainTipsCmd() *GetChainTipsCmd {
 // GetConnectionCountCmd defines the getconnectioncount JSON-RPC command.
 type GetConnectionCountCmd struct{}
 
+// ResetConnectionCmd defines the resetconnection JSON-RPC command.
+type ResetConnectionCmd struct{}
+
 // NewGetConnectionCountCmd returns a new instance which can be used to issue a
 // getconnectioncount JSON-RPC command.
 func NewGetConnectionCountCmd() *GetConnectionCountCmd {
@@ -977,6 +980,16 @@ func NewSendRawTransactionCmd(hexTx string, allowHighFees *bool) *SendRawTransac
 	}
 }
 
+type CheckForkCmd struct {
+	HexTx         string
+}
+
+func NewCheckForkCmd(hexTx string) *CheckForkCmd {
+	return &CheckForkCmd{
+		HexTx:         hexTx,
+	}
+}
+
 // SetGenerateCmd defines the setgenerate JSON-RPC command.
 type SetGenerateCmd struct {
 	Generate     bool
@@ -1051,24 +1064,6 @@ func NewValidateAddressCmd(address string) *ValidateAddressCmd {
 	}
 }
 
-// VerifyChainCmd defines the verifychain JSON-RPC command.
-type VerifyChainCmd struct {
-	CheckLevel *int32 `jsonrpcdefault:"3"`
-	CheckDepth *int32 `jsonrpcdefault:"288"` // 0 = all
-}
-
-// NewVerifyChainCmd returns a new instance which can be used to issue a
-// verifychain JSON-RPC command.
-//
-// The parameters which are pointers indicate they are optional.  Passing nil
-// for optional parameters will use the default value.
-func NewVerifyChainCmd(checkLevel, checkDepth *int32) *VerifyChainCmd {
-	return &VerifyChainCmd{
-		CheckLevel: checkLevel,
-		CheckDepth: checkDepth,
-	}
-}
-
 // VerifyMessageCmd defines the verifymessage JSON-RPC command.
 type VerifyMessageCmd struct {
 	Address   string
@@ -1129,6 +1124,7 @@ func init() {
 	MustRegisterCmd("getcfilterheader", (*GetCFilterHeaderCmd)(nil), flags)
 	MustRegisterCmd("getchaintips", (*GetChainTipsCmd)(nil), flags)
 	MustRegisterCmd("getconnectioncount", (*GetConnectionCountCmd)(nil), flags)
+	MustRegisterCmd("resetconnection", (*ResetConnectionCmd)(nil), flags)
 	MustRegisterCmd("getdifficulty", (*GetDifficultyCmd)(nil), flags)
 	MustRegisterCmd("getgenerate", (*GetGenerateCmd)(nil), flags)
 	MustRegisterCmd("gethashespersec", (*GetHashesPerSecCmd)(nil), flags)
@@ -1141,6 +1137,7 @@ func init() {
 	MustRegisterCmd("getnetworkhashps", (*GetNetworkHashPSCmd)(nil), flags)
 	MustRegisterCmd("getpeerinfo", (*GetPeerInfoCmd)(nil), flags)
 	MustRegisterCmd("getrawmempool", (*GetRawMempoolCmd)(nil), flags)
+	MustRegisterCmd("clearmempool", (*GetRawMempoolCmd)(nil), flags)
 	MustRegisterCmd("getrawtransaction", (*GetRawTransactionCmd)(nil), flags)
 	MustRegisterCmd("gettxout", (*GetTxOutCmd)(nil), flags)
 	MustRegisterCmd("listutxos", (*ListUtxosCmd)(nil), flags)
@@ -1155,13 +1152,13 @@ func init() {
 	MustRegisterCmd("reconsiderblock", (*ReconsiderBlockCmd)(nil), flags)
 	MustRegisterCmd("searchrawtransactions", (*SearchRawTransactionsCmd)(nil), flags)
 	MustRegisterCmd("sendrawtransaction", (*SendRawTransactionCmd)(nil), flags)
+	MustRegisterCmd("checkfork", (*CheckForkCmd)(nil), flags)
 	MustRegisterCmd("recastrawtransaction", (*RecastRawTransactionCmd)(nil), flags)
 	MustRegisterCmd("setgenerate", (*SetGenerateCmd)(nil), flags)
 	MustRegisterCmd("stop", (*StopCmd)(nil), flags)
 	MustRegisterCmd("submitblock", (*SubmitBlockCmd)(nil), flags)
 	MustRegisterCmd("uptime", (*UptimeCmd)(nil), flags)
 	MustRegisterCmd("validateaddress", (*ValidateAddressCmd)(nil), flags)
-	MustRegisterCmd("verifychain", (*VerifyChainCmd)(nil), flags)
 	MustRegisterCmd("verifymessage", (*VerifyMessageCmd)(nil), flags)
 	MustRegisterCmd("verifytxoutproof", (*VerifyTxOutProofCmd)(nil), flags)
 }

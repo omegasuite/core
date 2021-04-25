@@ -143,6 +143,7 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"SRVR": srvrLog,
 	"SYNC": syncLog,
 	"TXMP": txmpLog,
+	"CNSS": consensusLog,
 }
 
 // initLogRotator initializes the logging rotater to write logs to logFile and

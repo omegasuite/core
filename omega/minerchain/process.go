@@ -24,7 +24,26 @@ import (
 	"github.com/omegasuite/btcd/chaincfg/chainhash"
 	"github.com/omegasuite/btcd/database"
 	"github.com/omegasuite/btcd/wire"
+	"github.com/omegasuite/btcd/wire/common"
 )
+
+/*
+func (b *MinerChain) blockExistsSomewhere(hash *chainhash.Hash) (bool, error) {
+	// Check block index first (could be main chain or side chain blocks).
+	if b.index.HaveBlock(hash) {
+		return true, nil
+	}
+
+	// Check in the database.
+	var exists bool
+	err := b.db.View(func(dbTx database.Tx) error {
+		var err error
+		exists, err = dbTx.HasBlock(hash)
+		return err
+	})
+	return exists, err
+}
+*/
 
 // blockExists determines whether a block with the given hash exists either in
 // the main chain or any side chains.
@@ -75,7 +94,8 @@ func (b *MinerChain) TryConnectOrphan(hash *chainhash.Hash) bool {
 		return false
 	}
 
-	return b.ProcessOrphans(&block.PrevBlock, blockchain.BFNone) == nil
+	err,_ := b.ProcessOrphans(&block.PrevBlock, blockchain.BFNone)
+	return err == nil
 }
 
 // processOrphans determines if there are any orphans which depend on the passed
@@ -87,20 +107,28 @@ func (b *MinerChain) TryConnectOrphan(hash *chainhash.Hash) bool {
 // are needed to pass along to maybeAcceptBlock.
 //
 // This function MUST be called with the chain state lock held (for writes).
-func (b *MinerChain) ProcessOrphans(hash *chainhash.Hash, flags blockchain.BehaviorFlags) error {
-	b.Orphans.ProcessOrphans(hash, func(processHash *chainhash.Hash, blk interface{}) bool {
+func (b *MinerChain) ProcessOrphans(hash *chainhash.Hash, flags blockchain.BehaviorFlags) (error, wire.Message) {
+	_, h := b.Orphans.ProcessOrphans(hash, func(processHash *chainhash.Hash, blk interface{}) (bool, wire.Message) {
 		parent := b.index.LookupNode(processHash)
 		block := (*wire.MinerBlock)(blk.(*orphanBlock))
 		if !b.blockChain.SameChain(block.MsgBlock().BestBlock, NodetoHeader(parent).BestBlock) {
-			return true
+			return true, nil
+		}
+
+		if block.MsgBlock().Version >= chaincfg.Version2 {
+			if r, _, hreq := b.checkV2(block, parent, flags); !r {
+				return true, hreq
+			}
+		} else if len(block.MsgBlock().ViolationReport) > 0 {
+			return true, nil
 		}
 
 		// Potentially accept the block into the block chain.
 		_, err := b.maybeAcceptBlock(block, flags)
-		return err != nil
+		return err != nil, nil
 	})
 
-	return nil
+	return nil, h
 }
 
 func (b *MinerChain) CheckSideChain(hash *chainhash.Hash) {
@@ -134,6 +162,45 @@ func (b *MinerChain) CheckSideChain(hash *chainhash.Hash) {
 	b.index.FlushToDB(dbStoreBlockNode)
 }
 
+func (b *MinerChain) checkV2(block *wire.MinerBlock, parent *chainutil.BlockNode, flags blockchain.BehaviorFlags) (bool, error, wire.Message) {
+	// if it is in side chain, skip these tests below as they depends on chain state
+	for p, i := parent, 0; i <= wire.ViolationReportDeadline && p != nil; i++ {
+		if p.Data.GetVersion() < chaincfg.Version2 {
+			break
+		}
+		if *block.MsgBlock().Utxos == *p.Data.(*blockchainNodeData).block.Utxos {
+			// not allowed same utxo in 100 blks
+			return false, fmt.Errorf("Re-use UTXO for collateral within 100 miner blocks"), nil
+		}
+		p = p.Parent
+	}
+	// check the coin for collateral exists and have correct amount
+	_, err := b.blockChain.CheckCollateral(block, &block.MsgBlock().BestBlock, flags)
+	if err != nil {
+		return false, err, nil
+	}
+	/* SameChain includes test of existence
+	   if have, _ := b.blockChain.HaveBlock(&block.MsgBlock().BestBlock); !have {
+	   	log.Infof("BestBlock %s does not Exists ", block.MsgBlock().BestBlock.String())
+	   	return false, true, nil, &block.MsgBlock().BestBlock
+	   }
+	*/
+
+	for _, p := range block.MsgBlock().ViolationReport {
+		for j, tb := range p.Blocks {
+			if !b.blockChain.HaveNode(&tb) {
+				// if we have node of the hash, it is in main chain or side chain
+				// otherwise, it is missing and we need to request it
+				return false, ruleError(ErrViolationReport, "Missing block in violation report"), &wire.MsgGetData{InvList: []*wire.InvVect{{common.InvTypeWitnessBlock, p.Blocks[j]}}}
+			}
+		}
+	}
+	if err := b.validateVioldationReports(block); err != nil {
+		return false, err, nil
+	}
+	return true, nil, nil
+}
+
 // ProcessBlock is the main workhorse for handling insertion of new blocks into
 // the block chain.  It includes functionality such as rejecting duplicate
 // blocks, ensuring blocks follow all rules, orphan handling, and insertion into
@@ -144,7 +211,7 @@ func (b *MinerChain) CheckSideChain(hash *chainhash.Hash) {
 // whether or not the block is an orphan.
 //
 // This function is safe for concurrent access.
-func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.BehaviorFlags) (bool, bool, error, *chainhash.Hash) {
+func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.BehaviorFlags) (bool, bool, error, wire.Message) {
 //	log.Infof("MinerChain.ProcessBlock: ChainLock.RLock")
 	b.chainLock.Lock()
 	defer b.chainLock.Unlock()
@@ -154,10 +221,10 @@ func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.Behav
 	log.Infof("miner Block hash %s\nprevhash %s", blockHash.String(), block.MsgBlock().PrevBlock.String())
 
 	// The block must not already exist in the main chain or side chains.
-	exists, err := b.blockExists(blockHash)
-	if err != nil {
-		return false, false, err, nil
-	}
+	exists := b.index.HaveBlock(blockHash)
+//	if err != nil {
+//		return false, false, err, nil
+//	}
 	if exists {
 		str := fmt.Sprintf("already have block %v", blockHash)
 		return false, false, ruleError(ErrDuplicateBlock, str), nil
@@ -169,8 +236,8 @@ func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.Behav
 		return false, false, ruleError(ErrDuplicateBlock, str), nil
 	}
 
-	// Perform preliminary sanity checks on the block and its transactions.
-	err = CheckBlockSanity(block, b.chainParams.PowLimit, b.timeSource, flags | blockchain.BFNoPoWCheck)
+	// Perform preliminary sanity checks on the block.
+	err := CheckBlockSanity(block, b.chainParams.PowLimit, b.timeSource, flags | blockchain.BFNoPoWCheck)
 	if err != nil {
 		return false, false, err, nil
 	}
@@ -188,10 +255,12 @@ func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.Behav
 
 	// Handle orphan blocks.
 	prevHash := &blockHeader.PrevBlock
-	prevHashExists, err := b.blockExists(prevHash)
-	if err != nil {
-		return false, false, err, nil
-	}
+
+	prevHashExists := b.index.HaveBlock(prevHash)
+
+//	if err != nil {
+//		return false, false, err, nil
+//	}
 	if !prevHashExists {
 		log.Infof("block prevHash does not Exists Adding orphan block %s with parent %s", blockHash.String(), prevHash.String())
 		b.Orphans.AddOrphanBlock((*orphanBlock)(block))
@@ -199,50 +268,25 @@ func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.Behav
 		return false, true, nil, nil
 	}
 
-	parent := b.index.LookupNode(prevHash)
-	if block.MsgBlock().Version >= chaincfg.Version2 {
-		for p, i := parent, 0; i <= wire.ViolationReportDeadline && p != nil; i++ {
-			if *block.MsgBlock().Utxos == *p.Data.(*blockchainNodeData).block.Utxos {
-				// not allowed same utxo in 100 blks
-				return false, false, fmt.Errorf("Re-use UTXO for collateral within 100 miner blocks"), nil
-			}
-			p = p.Parent
-		}
-		// check the coin for collateral exists and have correct amount
-		_, err = b.blockChain.CheckCollateral(block, flags)
-		if err != nil {
-			return false, false, err, nil
-		}
+	existblk,_ := b.blockChain.HaveBlock(&block.MsgBlock().BestBlock)
+	if !existblk {
+		log.Infof("best block does not exist")
+		return false, false, ruleError(ErrMissingBestBlock, "best block does not exist"),&wire.MsgGetData{InvList: []*wire.InvVect{{common.InvTypeWitnessBlock, block.MsgBlock().BestBlock}}}
 	}
 
-	if have,_ := b.blockChain.HaveBlock(&block.MsgBlock().BestBlock); !have {
-		log.Infof("BestBlock %s does not Exists ", block.MsgBlock().BestBlock.String())
-		return false, true, nil, &block.MsgBlock().BestBlock
+	parent := b.index.LookupNode(prevHash)
+	if !b.blockChain.SameChain(block.MsgBlock().BestBlock, NodetoHeader(parent).BestBlock) {
+		log.Infof("block and parent tx reference not in the same chain.")
+//		b.Orphans.AddOrphanBlock((*orphanBlock)(block))
+		return false, false, fmt.Errorf("block and parent tx reference not in the same chain."), nil
 	}
+
 	if block.MsgBlock().Version >= chaincfg.Version2 {
-		for _, p := range block.MsgBlock().ViolationReport {
-			for j, tb := range p.Blocks {
-				if !b.blockChain.HaveNode(&tb) {
-					// if we have node of the hash, it is in main chain or side chain
-					// otherwise, it is missing and we need to request it
-					return false, false, nil, &p.Blocks[j]
-				}
-			}
+		if r, err, hreq := b.checkV2(block, parent, flags); !r {
+			return false, false, err, hreq
 		}
 	} else if len(block.MsgBlock().ViolationReport) > 0 {
 		return false, false, fmt.Errorf("Unexpected blacklist"), nil
-	}
-
-	if !b.blockChain.SameChain(block.MsgBlock().BestBlock, NodetoHeader(parent).BestBlock) {
-		log.Infof("block and parent tx reference not in the same chain.")
-		b.Orphans.AddOrphanBlock((*orphanBlock)(block))
-		return false, true, nil, nil
-	}
-
-	if len(block.MsgBlock().ViolationReport) > 0 {
-		if err := b.validateVioldationReports(block); err != nil {
-			return false, false ,err, nil
-		}
 	}
 
 	// the rule is new ContractLimit must not less than prev ContractLimit
@@ -257,7 +301,7 @@ func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.Behav
 			contractlim = b.chainParams.ContractExecLimit
 		}
 		limita := b.blockChain.MaxContractExec(lastBlk.BestBlock, block.MsgBlock().BestBlock)
-		if contractlim < limita || contractlim < lastBlk.ContractLimit {
+		if contractlim < limita || contractlim < lastBlk.ContractLimit*95/100 {
 			return false, false, fmt.Errorf("ContractLimit is too low"), nil
 		}
 		if contractlim > 2*limita && contractlim > lastBlk.ContractLimit && contractlim > b.chainParams.ContractExecLimit {
@@ -279,17 +323,17 @@ func (b *MinerChain) ProcessBlock(block *wire.MinerBlock, flags blockchain.Behav
 	// Accept any orphan blocks that depend on this block (they are
 	// no longer orphans) and repeat for those accepted blocks until
 	// there are no more.
-	err = b.ProcessOrphans(blockHash, flags)
+	err, h := b.ProcessOrphans(blockHash, flags)
 	if err != nil {
 //		log.Infof("b.ProcessOrphans error %s", err)
-		return false, false, err, nil
+		return false, false, err, h
 	}
 
 	log.Infof("miner.ProcessBlock finished with height = %d (%d) tx height = %d orphans = %d",
 		b.BestSnapshot().Height, block.Height(),
 		b.blockChain.BestSnapshot().Height, b.Orphans.Count())
 
-	return isMainChain, false, nil, nil
+	return isMainChain, false, nil, h
 }
 
 // checkBlockSanity performs some preliminary checks on a block to ensure it is
@@ -379,7 +423,7 @@ func (b *MinerChain) validateVioldationReports(block * wire.MinerBlock) error {
 			return fmt.Errorf("violation report exceeds time limit")
 		}
 		if bestnode.Height < v.Height {
-			return fmt.Errorf("Can not report a violation at hight higher than bestblock")
+			return ruleError(ErrViolationReport, "Can not report a violation at hight higher than bestblock")
 		}
 		if len(v.Blocks) < 2 {
 			return fmt.Errorf("A incident must include at least two blocks")
@@ -404,7 +448,7 @@ func (b *MinerChain) validateVioldationReports(block * wire.MinerBlock) error {
 				delete(vb[v.MRBlock], h)
 			}
 			if txb.Height() != v.Height {
-				return fmt.Errorf("Incorrect violation report height")
+				return ruleError(ErrViolationReport, "Incorrect violation report height")
 			}
 
 			signed := false
@@ -467,10 +511,10 @@ func (b *MinerChain) validateVioldationReports(block * wire.MinerBlock) error {
 			}
 
 			if !matched {
-				return fmt.Errorf("An orphan violation is reported")
+				return ruleError(ErrViolationReport, "An orphan violation is reported")
 			}
 			if !hasmainchain {
-				return fmt.Errorf("The report does not contain a best chain block")
+				return ruleError(ErrViolationReport, "The report does not contain a best chain block")
 			}
 		}
 	}

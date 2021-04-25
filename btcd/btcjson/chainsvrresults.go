@@ -598,8 +598,16 @@ type SearchRawTransactionsResult struct {
 	Vout          []Vout       `json:"vout"`
 	BlockHash     string       `json:"blockhash,omitempty"`
 	Confirmations uint64       `json:"confirmations,omitempty"`
-	Time          int64        `json:"time,omitempty"`
+	Height        uint32       `json:"height,omitempty"`
 	Blocktime     int64        `json:"blocktime,omitempty"`
+}
+
+type SearchRawTransactionsRawResult struct {
+	Height        uint32       `json:"height"`
+	Txid          string       `json:"txid"`
+	Hex           string       `json:"hex"`
+	BlockHash     string       `json:"blockhash"`
+	Blocktime     int64        `json:"blocktime"`
 }
 
 // TxRawDecodeResult models the data from the decoderawtransaction command.

@@ -1,4 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (C) 2019-2021 Omegasuite developer
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -247,7 +248,7 @@ func btcdMain(serverChan chan<- *server) error {
 	}()
 
 	if len(cfg.privateKeys) != 0 && cfg.Generate {
-		go consensus.Consensus(server, cfg.signAddress, activeNetParams.Params)
+		go consensus.Consensus(server, cfg.DataDir, cfg.signAddress, activeNetParams.Params)
 		for _,sa := range cfg.signAddress {
 			btcdLog.Infof("Address of miner %s", sa.String())
 		}

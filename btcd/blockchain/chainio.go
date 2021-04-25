@@ -445,7 +445,7 @@ func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]view
 	for _, tx := range txns {
 		numStxos += len(tx.TxIn)
 		for _,in := range tx.TxIn {
-			if in.IsSeparator() {
+			if in.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 				numStxos--
 			}
 		}
@@ -477,7 +477,7 @@ func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]view
 		// the associated stxo.
 		for txInIdx := len(tx.TxIn) - 1; txInIdx > -1; txInIdx-- {
 			txIn := tx.TxIn[txInIdx]
-			if txIn.IsSeparator() {
+			if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 				continue
 			}
 			stxo := &stxos[stxoIdx]
@@ -906,12 +906,16 @@ func (b *BlockChain) createChainState() error {
 func (b *BlockChain) initChainState() error {
 	// Determine the state of the chain database. We may need to initialize
 	// everything from scratch or upgrade certain buckets.
-	var initialized, hasBlockIndex, hasminertps, hascomptx bool
+	var initialized, hasBlockIndex, hasminertps, hascomptx, hasaddrusage bool
+	var addrUseIndexKey = []byte("usebyaddridx")
+
 	err := b.db.View(func(dbTx database.Tx) error {
+
 		initialized = dbTx.Metadata().Get(chainStateKeyName) != nil
 		hasBlockIndex = dbTx.Metadata().Bucket(blockIndexBucketName) != nil
 		hasminertps = dbTx.Metadata().Bucket(minerTPSBucketName) != nil
 		hascomptx = dbTx.Metadata().Bucket(compendatedBucketName) != nil
+		hasaddrusage = dbTx.Metadata().Bucket(addrUseIndexKey) != nil
 		return nil
 	})
 	if err != nil {
@@ -939,6 +943,34 @@ func (b *BlockChain) initChainState() error {
 			return err
 		}
 	}
+	if !hasaddrusage {
+		err := b.db.Update(func(dbTx database.Tx) error {
+			if _, err = dbTx.Metadata().CreateBucket(addrUseIndexKey); err != nil {
+				return err
+			}
+
+			// ad hoc getting best state to avoid circular importation
+			chainStateKeyName := []byte("chainstate")
+			serializedData := dbTx.Metadata().Get(chainStateKeyName)
+			if serializedData == nil {
+					return nil
+				}
+			var hash chainhash.Hash
+			copy(hash[:], serializedData[0:chainhash.HashSize])
+
+			h,_ := DbFetchHeaderByHash(dbTx, &hash)
+			if h.Version < wire.Version2 {
+				indexesBucket := dbTx.Metadata().Bucket([]byte("idxtips"))
+				return indexesBucket.Put(addrUseIndexKey, serializedData)
+			}
+
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
 	if !hascomptx {
 		err := b.db.Update(func(dbTx database.Tx) error {
 			if _, err = dbTx.Metadata().CreateBucket(compendatedBucketName); err != nil {
@@ -1696,7 +1728,7 @@ func (b *BlockChain) FetchUtxoView(tx *btcutil.Tx) (*viewpoint.ViewPointSet, err
 	}
 	if !IsCoinBase(tx) {
 		for _, txIn := range tx.MsgTx().TxIn {
-			if txIn.IsSeparator() {
+			if txIn.PreviousOutPoint.Hash.IsEqual(&zerohash) {
 				continue
 			}
 			neededSet[txIn.PreviousOutPoint] = struct{}{}

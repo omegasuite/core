@@ -8,7 +8,6 @@ package netsync
 import (
 	"container/list"
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/omegasuite/omega/minerchain"
 	"net"
 	"reflect"
@@ -1064,11 +1063,16 @@ func (sm *SyncManager) handleMinerBlockMsg(bmsg *minerBlockMsg) {
 	b2 := sm.chain.Miners.BestSnapshot()
 
 	if h != nil {
+		peer.QueueMessageWithEncoding(h, nil, wire.SignatureEncoding)
+
+/*
 		sm.AddSyncJob(peer,
-			sm.chain.BlockLocatorFromHash(&zeroHash),
+//			sm.chain.BlockLocatorFromHash(&zeroHash),
+			chainhash.BlockLocator(make([]*chainhash.Hash, 0)),
 			chainhash.BlockLocator(make([]*chainhash.Hash, 0)),
 			h, &zeroHash,
 			[2]int32{b1.Height, b2.Height})
+ */
 	}
 
 	if err != nil {
@@ -1820,7 +1824,7 @@ out:
 
 		case m := <-sm.msgChan:
 			log.Debugf("blockHandler took a message from sm.msgChan: ", reflect.TypeOf(m).String())
-			sm.lastBlockOp = spew.Sdump(m)
+			sm.lastBlockOp = "sm.msgChan"
 
 			switch msg := m.(type) {
 			case *newPeerMsg:
